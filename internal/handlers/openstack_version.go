@@ -48,16 +48,27 @@ func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Co
 			osVersion = &versions[0]
 		}
 
-		// Build response with relevant fields
+		// Build response with full status information
+		spec := map[string]interface{}{
+			"targetVersion": osVersion.Spec.TargetVersion,
+		}
+
+		// Add customContainerImages if present
+		if osVersion.Spec.CustomContainerImages.ContainerTemplate != (openstackv1beta1.ContainerTemplate{}) ||
+			len(osVersion.Spec.CustomContainerImages.CinderVolumeImages) > 0 ||
+			len(osVersion.Spec.CustomContainerImages.ManilaShareImages) > 0 {
+			spec["customContainerImages"] = osVersion.Spec.CustomContainerImages
+		}
+
 		response := map[string]interface{}{
 			"name":      osVersion.Name,
 			"namespace": osVersion.Namespace,
-			"spec": map[string]interface{}{
-				"targetVersion": osVersion.Spec.TargetVersion,
-			},
+			"spec":      spec,
 			"status": map[string]interface{}{
-				"availableVersion": osVersion.Status.AvailableVersion,
-				"deployedVersion":  osVersion.Status.DeployedVersion,
+				"availableVersion":  osVersion.Status.AvailableVersion,
+				"deployedVersion":   osVersion.Status.DeployedVersion,
+				"containerImages":   osVersion.Status.ContainerImages,
+				"observedGeneration": osVersion.Status.ObservedGeneration,
 			},
 		}
 
@@ -79,6 +90,24 @@ func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Co
 			response["status"].(map[string]interface{})["conditions"] = conditions
 		}
 
+		// Add containerImageVersionDefaults if present
+		if osVersion.Status.ContainerImageVersionDefaults != nil {
+			response["status"].(map[string]interface{})["containerImageVersionDefaults"] = osVersion.Status.ContainerImageVersionDefaults
+		}
+
+		// Add serviceDefaults if present
+		response["status"].(map[string]interface{})["serviceDefaults"] = osVersion.Status.ServiceDefaults
+
+		// Add availableServiceDefaults if present
+		if osVersion.Status.AvailableServiceDefaults != nil {
+			response["status"].(map[string]interface{})["availableServiceDefaults"] = osVersion.Status.AvailableServiceDefaults
+		}
+
+		// Add trackedCustomImages if present
+		if osVersion.Status.TrackedCustomImages != nil {
+			response["status"].(map[string]interface{})["trackedCustomImages"] = osVersion.Status.TrackedCustomImages
+		}
+
 		// Convert response to JSON
 		jsonData, err := json.MarshalIndent(response, "", "  ")
 		if err != nil {
@@ -89,8 +118,8 @@ func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Co
 	}
 }
 
-// SetOpenStackVersionTargetVersionHandler handles the set_openstack_version_targetversion tool call
-func SetOpenStackVersionTargetVersionHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// UpdateOpenStackVersionHandler handles the update_openstack_version tool call
+func UpdateOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Extract parameters
 		namespace, ok := request.Params.Arguments["namespace"].(string)
@@ -108,8 +137,14 @@ func SetOpenStackVersionTargetVersionHandler(k8sClient *client.K8sClient) func(c
 			return mcp.NewToolResultError("targetVersion parameter is required"), nil
 		}
 
+		// Extract optional customContainerImages parameter
+		var customContainerImages map[string]interface{}
+		if customImages, ok := request.Params.Arguments["customContainerImages"].(map[string]interface{}); ok {
+			customContainerImages = customImages
+		}
+
 		// Patch the OpenStackVersion CR
-		osVersion, err := k8sClient.PatchOpenStackVersionTargetVersion(ctx, namespace, name, targetVersion)
+		osVersion, err := k8sClient.PatchOpenStackVersion(ctx, namespace, name, targetVersion, customContainerImages)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to patch OpenStackVersion: %v", err)), nil
 		}

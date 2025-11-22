@@ -10,7 +10,17 @@ A Model Context Protocol (MCP) server for querying OpenStack Kubernetes operator
   - Deployed version
   - Status conditions
 
-- **set_openstack_version_targetversion**: Patch the targetVersion field of an OpenStackVersion CRD to set a new target version
+- **update_openstack_version**: Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion CRD
+
+- **get_openstack_controlplane**: Query OpenStackControlPlane CRD to retrieve spec and status information
+
+- **create_dataplane_deployment**: Create an OpenStackDataplaneDeployment CR to deploy services on dataplane nodes
+
+- **get_dataplane_deployment**: Query OpenStackDataplaneDeployment CRD to retrieve spec and status information
+
+- **list_dataplane_deployments**: List all OpenStackDataplaneDeployment CRs in a namespace
+
+- **list_dataplane_nodesets**: List all OpenStackDataplaneNodeSet CRs in a namespace
 
 ## Prerequisites
 
@@ -81,14 +91,15 @@ JSON object containing:
 }
 ```
 
-### MCP Tool: set_openstack_version_targetversion
+### MCP Tool: update\_openstack\_version
 
-Patch the targetVersion field of an OpenStackVersion custom resource:
+Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion custom resource:
 
 **Parameters:**
 - `namespace` (optional): Kubernetes namespace where the OpenStackVersion CR is located. Defaults to `openstack` if not provided.
 - `name` (required): Name of the OpenStackVersion CR to patch
 - `targetVersion` (required): The target version to set for the OpenStackVersion CR
+- `customContainerImages` (optional): Map of service names to custom container image URLs. If not provided, customContainerImages will not be modified.
 
 **Returns:**
 JSON object containing:
@@ -112,6 +123,339 @@ JSON object containing:
     "deployedVersion": "0.3.0"
   }
 }
+```
+
+### Example Usage with customContainerImages
+
+```json
+{
+  "name": "openstack",
+  "namespace": "openstack",
+  "targetVersion": "0.4.0",
+  "customContainerImages": {
+    "nova": "quay.io/openstack-k8s-operators/nova-operator:v0.4.0",
+    "neutron": "quay.io/openstack-k8s-operators/neutron-operator:v0.4.0"
+  }
+}
+```
+
+### MCP Tool: get\_openstack\_controlplane
+
+Query an OpenStackControlPlane custom resource:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackControlPlane CR is located. Defaults to `openstack` if not provided.
+- `name` (optional): Name of the OpenStackControlPlane CR to query. If not provided, returns the first CR found in the namespace.
+
+**Returns:**
+JSON object containing:
+- `name`: CR name
+- `namespace`: CR namespace
+- `spec`: ControlPlane specification including:
+  - Service configurations (Nova, Neutron, Cinder, Glance, etc.)
+  - Database configuration
+  - Message queue configuration
+  - Other controlplane settings
+- `status`: ControlPlane status including:
+  - `conditions`: Array of condition objects with deployment status
+  - Service-specific status information
+  - Other status fields as available
+
+### Example Response
+
+```json
+{
+  "name": "openstack",
+  "namespace": "openstack",
+  "spec": {
+    "secret": "osp-secret",
+    "storageClass": "local-storage",
+    "nova": {
+      "enabled": true,
+      "template": {
+        "secret": "osp-secret"
+      }
+    },
+    "neutron": {
+      "enabled": true,
+      "template": {
+        "secret": "osp-secret"
+      }
+    },
+    "cinder": {
+      "enabled": true,
+      "template": {
+        "cinderVolumes": {
+          "volume1": {
+            "storageClass": "local-storage"
+          }
+        }
+      }
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True",
+        "lastTransitionTime": "2025-01-15T10:30:00Z",
+        "reason": "AllServicesReady",
+        "message": "All OpenStack services are ready"
+      }
+    ]
+  }
+}
+```
+
+### MCP Tool: create\_dataplane\_deployment
+
+Create an OpenStackDataplaneDeployment custom resource to deploy services on dataplane nodes:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneDeployment CR will be created. Defaults to `openstack` if not provided.
+- `name` (required): Name of the OpenStackDataplaneDeployment CR to create
+- `nodeSets` (required): Array of nodeSet names to deploy to. Must contain at least one nodeSet.
+- `servicesOverride` (optional): Array of service names to override the default services for the deployment
+
+**Returns:**
+Success message confirming the creation of the OpenStackDataplaneDeployment CR with the specified nodeSets and optional servicesOverride.
+
+### Example Usage
+
+Basic deployment to a single nodeSet:
+
+```json
+{
+  "name": "my-deployment",
+  "namespace": "openstack",
+  "nodeSets": ["compute-nodes"]
+}
+```
+
+Deployment to multiple nodeSets with service override:
+
+```json
+{
+  "name": "my-deployment",
+  "namespace": "openstack",
+  "nodeSets": ["compute-nodes", "storage-nodes"],
+  "servicesOverride": ["nova", "neutron", "ovn"]
+}
+```
+
+### MCP Tool: get\_dataplane\_deployment
+
+Query an OpenStackDataplaneDeployment custom resource to retrieve deployment information:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneDeployment CR is located. Defaults to `openstack` if not provided.
+- `name` (required): Name of the OpenStackDataplaneDeployment CR to query
+
+**Returns:**
+JSON object containing:
+- `name`: CR name
+- `namespace`: CR namespace
+- `spec`: Deployment specification including:
+  - `nodeSets`: Array of nodeSet names
+  - `servicesOverride`: Array of service names (if specified)
+- `status`: Deployment status including:
+  - `conditions`: Array of condition objects with deployment progress and status
+  - `nodeSetConditions`: Per-nodeSet deployment status
+  - Other status fields as available
+
+### Example Response
+
+```json
+{
+  "name": "my-deployment",
+  "namespace": "openstack",
+  "spec": {
+    "nodeSets": ["compute-nodes"],
+    "servicesOverride": ["nova", "neutron"]
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True",
+        "lastTransitionTime": "2025-01-15T10:30:00Z",
+        "reason": "DeploymentComplete",
+        "message": "All nodeSets have been deployed successfully"
+      }
+    ],
+    "nodeSetConditions": {
+      "compute-nodes": {
+        "Ready": {
+          "status": "True",
+          "message": "NodeSet deployment complete"
+        }
+      }
+    }
+  }
+}
+```
+
+### MCP Tool: list\_dataplane\_deployments
+
+List all OpenStackDataplaneDeployment custom resources in a namespace:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneDeployment CRs are located. Defaults to `openstack` if not provided.
+
+**Returns:**
+JSON array containing objects with:
+- `name`: Deployment CR name
+- `namespace`: Deployment CR namespace
+- `spec`: Deployment specification including:
+  - `nodeSets`: Array of nodeSet names
+  - `servicesOverride`: Array of service names (if specified)
+- `status`: Deployment status including:
+  - `conditions`: Array of condition objects
+  - `nodeSetConditions`: Per-nodeSet deployment status
+  - Other status fields as available
+
+### Example Response
+
+```json
+[
+  {
+    "name": "edpm-deployment",
+    "namespace": "openstack",
+    "spec": {
+      "nodeSets": ["compute-nodes", "storage-nodes"],
+      "servicesOverride": ["nova", "neutron", "ovn"]
+    },
+    "status": {
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "lastTransitionTime": "2025-01-15T10:30:00Z",
+          "reason": "DeploymentComplete",
+          "message": "All nodeSets have been deployed successfully"
+        }
+      ],
+      "nodeSetConditions": {
+        "compute-nodes": {
+          "Ready": {
+            "status": "True",
+            "message": "NodeSet deployment complete"
+          }
+        },
+        "storage-nodes": {
+          "Ready": {
+            "status": "True",
+            "message": "NodeSet deployment complete"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "upgrade-deployment",
+    "namespace": "openstack",
+    "spec": {
+      "nodeSets": ["compute-nodes"]
+    },
+    "status": {
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "False",
+          "lastTransitionTime": "2025-01-15T11:00:00Z",
+          "reason": "DeploymentInProgress",
+          "message": "Deployment in progress"
+        }
+      ]
+    }
+  }
+]
+```
+
+### MCP Tool: list\_dataplane\_nodesets
+
+List all OpenStackDataplaneNodeSet custom resources in a namespace:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneNodeSet CRs are located. Defaults to `openstack` if not provided.
+
+**Returns:**
+JSON array containing objects with:
+- `name`: NodeSet CR name
+- `namespace`: NodeSet CR namespace
+- `spec`: NodeSet specification including:
+  - `nodeTemplate`: Template for node configuration
+  - `nodes`: Map of node names to their configurations
+  - `services`: Services to deploy on the nodeSet
+  - Other specification fields
+- `status`: NodeSet status including:
+  - `conditions`: Array of condition objects
+  - `deploymentStatus`: Deployment progress information
+  - Other status fields as available
+
+### Example Response
+
+```json
+[
+  {
+    "name": "compute-nodes",
+    "namespace": "openstack",
+    "spec": {
+      "nodeTemplate": {
+        "ansibleSSHPrivateKeySecret": "dataplane-ansible-ssh-private-key-secret"
+      },
+      "nodes": {
+        "compute-0": {
+          "hostName": "compute-0",
+          "ansible": {
+            "ansibleHost": "192.168.1.10"
+          }
+        },
+        "compute-1": {
+          "hostName": "compute-1",
+          "ansible": {
+            "ansibleHost": "192.168.1.11"
+          }
+        }
+      },
+      "services": ["nova", "neutron", "ovn"]
+    },
+    "status": {
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "lastTransitionTime": "2025-01-15T10:30:00Z",
+          "message": "NodeSet is ready"
+        }
+      ]
+    }
+  },
+  {
+    "name": "storage-nodes",
+    "namespace": "openstack",
+    "spec": {
+      "nodes": {
+        "storage-0": {
+          "hostName": "storage-0",
+          "ansible": {
+            "ansibleHost": "192.168.1.20"
+          }
+        }
+      },
+      "services": ["ceph"]
+    },
+    "status": {
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "message": "NodeSet is ready"
+        }
+      ]
+    }
+  }
+]
 ```
 
 ## Configuration with Claude Desktop
