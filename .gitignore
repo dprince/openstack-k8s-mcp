@@ -11,8 +11,8 @@
 # Output of the go coverage tool
 *.out
 
-# Binary
-openstack-k8s-mcp
+# Binary (only in root directory)
+/bin
 
 # Dependency directories
 vendor/
