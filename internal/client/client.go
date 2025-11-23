@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	openstackv1beta1 "github.com/openstack-k8s-operators/openstack-operator/apis/core/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -276,4 +277,68 @@ func (c *K8sClient) ListDataplaneNodeSets(ctx context.Context, namespace string)
 	}
 
 	return nodeSets, nil
+}
+
+// ConditionStatus represents the result of checking a condition
+type ConditionStatus struct {
+	Met     bool
+	Message string
+	Reason  string
+}
+
+// WaitForCondition waits for a specific condition on an OpenStackVersion CR to become true
+// logFunc is called periodically to provide status updates
+func (c *K8sClient) WaitForCondition(ctx context.Context, namespace, name, conditionType string, timeoutSeconds int, pollIntervalSeconds int, logFunc func(string)) (*ConditionStatus, error) {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 300 // Default 5 minutes
+	}
+
+	if pollIntervalSeconds <= 0 {
+		pollIntervalSeconds = 5 // Default 5 seconds
+	}
+
+	pollInterval := pollIntervalSeconds
+	maxAttempts := timeoutSeconds / pollInterval
+
+	logFunc(fmt.Sprintf("Waiting for condition '%s' on OpenStackVersion '%s/%s' (timeout: %ds)", conditionType, namespace, name, timeoutSeconds))
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		osVersion, err := c.GetOpenStackVersion(ctx, namespace, name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get OpenStackVersion: %w", err)
+		}
+
+		// Check if the condition exists and is true
+		for _, cond := range osVersion.Status.Conditions {
+			if string(cond.Type) == conditionType {
+				if string(cond.Status) == "True" {
+					logFunc(fmt.Sprintf("✓ Condition '%s' is True - Ready!", conditionType))
+					return &ConditionStatus{
+						Met:     true,
+						Message: string(cond.Message),
+						Reason:  string(cond.Reason),
+					}, nil
+				}
+				// Condition exists but is not True - log current status
+				logFunc(fmt.Sprintf("Polling... Condition '%s' status: %s (reason: %s)", conditionType, cond.Status, cond.Reason))
+				break
+			}
+		}
+
+		// Wait before next poll
+		if attempt < maxAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(pollInterval) * time.Second):
+				// Continue to next iteration
+			}
+		}
+	}
+
+	return &ConditionStatus{
+		Met:     false,
+		Message: fmt.Sprintf("Timeout waiting for condition '%s'", conditionType),
+		Reason:  "Timeout",
+	}, nil
 }

@@ -12,6 +12,8 @@ A Model Context Protocol (MCP) server for querying OpenStack Kubernetes operator
 
 - **update_openstack_version**: Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion CRD
 
+- **wait_openstack_version**: Wait for a specific condition to be met on an OpenStackVersion CRD
+
 - **get_openstack_controlplane**: Query OpenStackControlPlane CRD to retrieve spec and status information
 
 - **create_dataplane_deployment**: Create an OpenStackDataplaneDeployment CR to deploy services on dataplane nodes
@@ -136,6 +138,39 @@ JSON object containing:
     "nova": "quay.io/openstack-k8s-operators/nova-operator:v0.4.0",
     "neutron": "quay.io/openstack-k8s-operators/neutron-operator:v0.4.0"
   }
+}
+```
+
+### MCP Tool: wait\_openstack\_version
+
+Wait for a specific condition to be met on an OpenStackVersion custom resource:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackVersion CR is located. Defaults to `openstack` if not provided.
+- `name` (required): Name of the OpenStackVersion CR to wait on
+- `condition` (required): The condition type to wait for (e.g., "Ready", "Available")
+- `timeout` (optional): Maximum time to wait in seconds. Defaults to 300 seconds if not provided.
+- `pollInterval` (optional): Interval in seconds between polling attempts. Defaults to 5 seconds if not provided.
+
+**Returns:**
+JSON object containing:
+- `name`: CR name
+- `namespace`: CR namespace
+- `condition`: The condition type that was waited for
+- `met`: Boolean indicating whether the condition was met
+- `message`: Status message from the condition
+- `reason`: Reason from the condition
+
+### Example Response
+
+```json
+{
+  "name": "openstack",
+  "namespace": "openstack",
+  "condition": "Ready",
+  "met": true,
+  "message": "All OpenStack components are ready",
+  "reason": "AllComponentsReady"
 }
 ```
 

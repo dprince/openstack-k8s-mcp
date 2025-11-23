@@ -7,6 +7,7 @@ import (
 
 	"github.com/dprince/openstack-k8s-mcp/internal/client"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	openstackv1beta1 "github.com/openstack-k8s-operators/openstack-operator/apis/core/v1beta1"
 )
 
@@ -160,6 +161,77 @@ func UpdateOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context
 				"availableVersion": osVersion.Status.AvailableVersion,
 				"deployedVersion":  osVersion.Status.DeployedVersion,
 			},
+		}
+
+		// Convert response to JSON
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal response: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonData)), nil
+	}
+}
+
+// WaitOpenStackVersionHandler handles the wait_openstack_version tool call
+func WaitOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Extract parameters
+		namespace, ok := request.Params.Arguments["namespace"].(string)
+		if !ok || namespace == "" {
+			namespace = DefaultNamespace
+		}
+
+		name, ok := request.Params.Arguments["name"].(string)
+		if !ok || name == "" {
+			return mcp.NewToolResultError("name parameter is required"), nil
+		}
+
+		conditionType, ok := request.Params.Arguments["condition"].(string)
+		if !ok || conditionType == "" {
+			return mcp.NewToolResultError("condition parameter is required"), nil
+		}
+
+		// Optional timeout parameter (default 300 seconds)
+		timeout := 300
+		if timeoutVal, ok := request.Params.Arguments["timeout"].(float64); ok {
+			timeout = int(timeoutVal)
+		}
+
+		// Optional pollInterval parameter (default 5 seconds)
+		pollInterval := 5
+		if pollIntervalVal, ok := request.Params.Arguments["pollInterval"].(float64); ok {
+			pollInterval = int(pollIntervalVal)
+		}
+
+		// Get the MCP server from context to send log notifications
+		mcpServer := server.ServerFromContext(ctx)
+
+		// Create a logging function that sends notifications to the client
+		logFunc := func(message string) {
+			if mcpServer != nil {
+				// Send a logging notification that will appear in the MCP client console
+				_ = mcpServer.SendNotificationToClient("notifications/message", map[string]interface{}{
+					"level":   "info",
+					"message": message,
+				})
+			}
+		}
+
+		// Wait for the condition
+		status, err := k8sClient.WaitForCondition(ctx, namespace, name, conditionType, timeout, pollInterval, logFunc)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to wait for condition: %v", err)), nil
+		}
+
+		// Build response
+		response := map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+			"condition": conditionType,
+			"met":       status.Met,
+			"message":   status.Message,
+			"reason":    status.Reason,
 		}
 
 		// Convert response to JSON
