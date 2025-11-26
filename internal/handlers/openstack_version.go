@@ -128,10 +128,17 @@ func UpdateOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context
 			namespace = DefaultNamespace
 		}
 
-		name, ok := request.Params.Arguments["name"].(string)
-		if !ok || name == "" {
-			return mcp.NewToolResultError("name parameter is required"), nil
+		// Look up the first OpenStackVersion in the namespace
+		versions, err := k8sClient.ListOpenStackVersions(ctx, namespace)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions: %v", err)), nil
 		}
+
+		if len(versions) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace %s", namespace)), nil
+		}
+
+		name := versions[0].Name
 
 		targetVersion, ok := request.Params.Arguments["targetVersion"].(string)
 		if !ok || targetVersion == "" {

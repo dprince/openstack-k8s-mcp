@@ -40,13 +40,9 @@ func main() {
 
 	// Register the update_openstack_version tool
 	updateOpenStackVersionTool := mcp.NewTool("update_openstack_version",
-		mcp.WithDescription("Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion CR. The customContainerImages parameter is optional and should be a map of service names to container image URLs."),
+		mcp.WithDescription("Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion CR. Automatically looks up the first OpenStackVersion CR in the namespace. The customContainerImages parameter is optional and should be a map of service names to container image URLs."),
 		mcp.WithString("namespace",
 			mcp.Description("Kubernetes namespace where the OpenStackVersion CR is located. Defaults to 'openstack' if not provided."),
-		),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Name of the OpenStackVersion CR to patch"),
 		),
 		mcp.WithString("targetVersion",
 			mcp.Required(),
