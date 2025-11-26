@@ -91,18 +91,8 @@ func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Co
 			response["status"].(map[string]interface{})["conditions"] = conditions
 		}
 
-		// Add containerImageVersionDefaults if present
-		if osVersion.Status.ContainerImageVersionDefaults != nil {
-			response["status"].(map[string]interface{})["containerImageVersionDefaults"] = osVersion.Status.ContainerImageVersionDefaults
-		}
-
 		// Add serviceDefaults if present
 		response["status"].(map[string]interface{})["serviceDefaults"] = osVersion.Status.ServiceDefaults
-
-		// Add availableServiceDefaults if present
-		if osVersion.Status.AvailableServiceDefaults != nil {
-			response["status"].(map[string]interface{})["availableServiceDefaults"] = osVersion.Status.AvailableServiceDefaults
-		}
 
 		// Add trackedCustomImages if present
 		if osVersion.Status.TrackedCustomImages != nil {
