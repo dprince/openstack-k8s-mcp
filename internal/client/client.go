@@ -342,3 +342,180 @@ func (c *K8sClient) WaitForCondition(ctx context.Context, namespace, name, condi
 		Reason:  "Timeout",
 	}, nil
 }
+
+// VerificationResult represents the result of verifying conditions
+type VerificationResult struct {
+	AllReady          bool
+	TotalConditions   int
+	ReadyConditions   []string
+	NotReadyConditions []map[string]string
+}
+
+// VerifyControlPlaneConditions checks if all conditions on an OpenStackControlPlane CR are ready
+func (c *K8sClient) VerifyControlPlaneConditions(ctx context.Context, namespace, name string) (*VerificationResult, error) {
+	controlPlane, err := c.GetOpenStackControlPlane(ctx, namespace, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get OpenStackControlPlane: %w", err)
+	}
+
+	result := &VerificationResult{
+		AllReady:           true,
+		ReadyConditions:    []string{},
+		NotReadyConditions: []map[string]string{},
+	}
+
+	// Extract status and conditions
+	status, ok := controlPlane["status"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("no status found on OpenStackControlPlane")
+	}
+
+	conditions, ok := status["conditions"].([]interface{})
+	if !ok || len(conditions) == 0 {
+		return nil, fmt.Errorf("no conditions found on OpenStackControlPlane")
+	}
+
+	result.TotalConditions = len(conditions)
+
+	// Check all conditions
+	for _, condInterface := range conditions {
+		cond, ok := condInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		condType, _ := cond["type"].(string)
+		condStatus, _ := cond["status"].(string)
+		condReason, _ := cond["reason"].(string)
+		condMessage, _ := cond["message"].(string)
+
+		if condStatus == "True" {
+			result.ReadyConditions = append(result.ReadyConditions, condType)
+		} else {
+			result.AllReady = false
+			result.NotReadyConditions = append(result.NotReadyConditions, map[string]string{
+				"type":    condType,
+				"status":  condStatus,
+				"reason":  condReason,
+				"message": condMessage,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+// NodeSetVerificationResult represents the verification result for a single NodeSet
+type NodeSetVerificationResult struct {
+	Name              string
+	AllReady          bool
+	TotalConditions   int
+	ReadyConditions   []string
+	NotReadyConditions []map[string]string
+}
+
+// AllNodeSetsVerificationResult represents the verification result for all NodeSets
+type AllNodeSetsVerificationResult struct {
+	AllReady  bool
+	TotalNodeSets int
+	ReadyNodeSets []string
+	NotReadyNodeSets []NodeSetVerificationResult
+}
+
+// VerifyDataplaneNodeSetsConditions checks if all conditions on all OpenStackDataplaneNodeSet CRs are ready
+func (c *K8sClient) VerifyDataplaneNodeSetsConditions(ctx context.Context, namespace string) (*AllNodeSetsVerificationResult, error) {
+	nodeSets, err := c.ListDataplaneNodeSets(ctx, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list OpenStackDataplaneNodeSets: %w", err)
+	}
+
+	if len(nodeSets) == 0 {
+		return nil, fmt.Errorf("no OpenStackDataplaneNodeSets found in namespace '%s'", namespace)
+	}
+
+	result := &AllNodeSetsVerificationResult{
+		AllReady:         true,
+		TotalNodeSets:    len(nodeSets),
+		ReadyNodeSets:    []string{},
+		NotReadyNodeSets: []NodeSetVerificationResult{},
+	}
+
+	// Check each NodeSet
+	for _, nodeSet := range nodeSets {
+		metadata := nodeSet["metadata"].(map[string]interface{})
+		name := metadata["name"].(string)
+
+		nodeSetResult := NodeSetVerificationResult{
+			Name:               name,
+			AllReady:           true,
+			ReadyConditions:    []string{},
+			NotReadyConditions: []map[string]string{},
+		}
+
+		// Extract status and conditions
+		status, ok := nodeSet["status"].(map[string]interface{})
+		if !ok {
+			result.AllReady = false
+			nodeSetResult.AllReady = false
+			nodeSetResult.NotReadyConditions = append(nodeSetResult.NotReadyConditions, map[string]string{
+				"type":    "Status",
+				"status":  "Unknown",
+				"reason":  "NoStatus",
+				"message": "No status found on NodeSet",
+			})
+			result.NotReadyNodeSets = append(result.NotReadyNodeSets, nodeSetResult)
+			continue
+		}
+
+		conditions, ok := status["conditions"].([]interface{})
+		if !ok || len(conditions) == 0 {
+			result.AllReady = false
+			nodeSetResult.AllReady = false
+			nodeSetResult.NotReadyConditions = append(nodeSetResult.NotReadyConditions, map[string]string{
+				"type":    "Conditions",
+				"status":  "Unknown",
+				"reason":  "NoConditions",
+				"message": "No conditions found on NodeSet",
+			})
+			result.NotReadyNodeSets = append(result.NotReadyNodeSets, nodeSetResult)
+			continue
+		}
+
+		nodeSetResult.TotalConditions = len(conditions)
+
+		// Check all conditions for this NodeSet
+		for _, condInterface := range conditions {
+			cond, ok := condInterface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			condType, _ := cond["type"].(string)
+			condStatus, _ := cond["status"].(string)
+			condReason, _ := cond["reason"].(string)
+			condMessage, _ := cond["message"].(string)
+
+			if condStatus == "True" {
+				nodeSetResult.ReadyConditions = append(nodeSetResult.ReadyConditions, condType)
+			} else {
+				nodeSetResult.AllReady = false
+				result.AllReady = false
+				nodeSetResult.NotReadyConditions = append(nodeSetResult.NotReadyConditions, map[string]string{
+					"type":    condType,
+					"status":  condStatus,
+					"reason":  condReason,
+					"message": condMessage,
+				})
+			}
+		}
+
+		// Add to appropriate list
+		if nodeSetResult.AllReady {
+			result.ReadyNodeSets = append(result.ReadyNodeSets, name)
+		} else {
+			result.NotReadyNodeSets = append(result.NotReadyNodeSets, nodeSetResult)
+		}
+	}
+
+	return result, nil
+}

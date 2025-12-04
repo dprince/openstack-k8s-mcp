@@ -15,6 +15,34 @@ const (
 	DefaultNamespace = "openstack"
 )
 
+// Error codes for structured error responses
+const (
+	ErrorCodeNotFound         = "RESOURCE_NOT_FOUND"
+	ErrorCodeInvalidParameter = "INVALID_PARAMETER"
+	ErrorCodeK8sAPIError      = "K8S_API_ERROR"
+	ErrorCodeMarshalError     = "MARSHAL_ERROR"
+	ErrorCodeTimeout          = "TIMEOUT"
+	ErrorCodeConditionNotMet  = "CONDITION_NOT_MET"
+)
+
+// StructuredError represents a structured error response for better LLM parsing
+type StructuredError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Type    string `json:"type"`
+}
+
+// newStructuredError creates a structured error response
+func newStructuredError(code, message, errType string) *mcp.CallToolResult {
+	errData := StructuredError{
+		Code:    code,
+		Message: message,
+		Type:    errType,
+	}
+	jsonData, _ := json.Marshal(errData)
+	return mcp.NewToolResultError(string(jsonData))
+}
+
 // GetOpenStackVersionHandler handles the get_openstack_version tool call
 func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -33,71 +61,57 @@ func GetOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.Co
 			// Query the specific OpenStackVersion CR by name
 			osVersion, err = k8sClient.GetOpenStackVersion(ctx, namespace, name)
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Failed to get OpenStackVersion: %v", err)), nil
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to get OpenStackVersion '%s' in namespace '%s': %v", name, namespace, err)), nil
 			}
 		} else {
-			// List all OpenStackVersion CRs and return the first one
+			// Auto-discover: List all OpenStackVersion CRs and return the first one
 			versions, err := k8sClient.ListOpenStackVersions(ctx, namespace)
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions: %v", err)), nil
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions in namespace '%s': %v", namespace, err)), nil
 			}
 
 			if len(versions) == 0 {
-				return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace %s", namespace)), nil
+				return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace '%s'", namespace)), nil
 			}
 
 			osVersion = &versions[0]
 		}
 
-		// Build response with full status information
-		spec := map[string]interface{}{
-			"targetVersion": osVersion.Spec.TargetVersion,
+		// Build flattened response
+		response := map[string]interface{}{
+			"name":             osVersion.Name,
+			"namespace":        osVersion.Namespace,
+			"targetVersion":    osVersion.Spec.TargetVersion,
+			"availableVersion": osVersion.Status.AvailableVersion,
+			"deployedVersion":  osVersion.Status.DeployedVersion,
 		}
 
 		// Add customContainerImages if present
 		if osVersion.Spec.CustomContainerImages.ContainerTemplate != (openstackv1beta1.ContainerTemplate{}) ||
 			len(osVersion.Spec.CustomContainerImages.CinderVolumeImages) > 0 ||
 			len(osVersion.Spec.CustomContainerImages.ManilaShareImages) > 0 {
-			spec["customContainerImages"] = osVersion.Spec.CustomContainerImages
+			response["customContainerImages"] = osVersion.Spec.CustomContainerImages
 		}
 
-		response := map[string]interface{}{
-			"name":      osVersion.Name,
-			"namespace": osVersion.Namespace,
-			"spec":      spec,
-			"status": map[string]interface{}{
-				"availableVersion":  osVersion.Status.AvailableVersion,
-				"deployedVersion":   osVersion.Status.DeployedVersion,
-				"containerImages":   osVersion.Status.ContainerImages,
-				"observedGeneration": osVersion.Status.ObservedGeneration,
-			},
-		}
+		// Process conditions into ready and notReady arrays
+		readyConditions := []string{}
+		notReadyConditions := []string{}
 
-		// Add conditions if present
-		if len(osVersion.Status.Conditions) > 0 {
-			conditions := make([]map[string]interface{}, len(osVersion.Status.Conditions))
-			for i, cond := range osVersion.Status.Conditions {
-				conditions[i] = map[string]interface{}{
-					"type":               cond.Type,
-					"status":             cond.Status,
-					"lastTransitionTime": cond.LastTransitionTime.Time,
-					"reason":             cond.Reason,
-					"message":            cond.Message,
-				}
-				if cond.Severity != "" {
-					conditions[i]["severity"] = cond.Severity
-				}
+		for _, cond := range osVersion.Status.Conditions {
+			if cond.Status == "True" {
+				readyConditions = append(readyConditions, string(cond.Type))
+			} else {
+				notReadyConditions = append(notReadyConditions, string(cond.Type))
 			}
-			response["status"].(map[string]interface{})["conditions"] = conditions
 		}
 
-		// Add serviceDefaults if present
-		response["status"].(map[string]interface{})["serviceDefaults"] = osVersion.Status.ServiceDefaults
+		response["readyConditions"] = readyConditions
+		response["notReadyConditions"] = notReadyConditions
 
-		// Add trackedCustomImages if present
-		if osVersion.Status.TrackedCustomImages != nil {
-			response["status"].(map[string]interface{})["trackedCustomImages"] = osVersion.Status.TrackedCustomImages
-		}
+		// Add optional detailed fields if present
+		// if osVersion.Status.ContainerImages != nil {
+		// 	response["containerImages"] = osVersion.Status.ContainerImages
+		// }
 
 		// Convert response to JSON
 		jsonData, err := json.MarshalIndent(response, "", "  ")
@@ -118,14 +132,14 @@ func UpdateOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context
 			namespace = DefaultNamespace
 		}
 
-		// Look up the first OpenStackVersion in the namespace
+		// Auto-discover the first OpenStackVersion in the namespace
 		versions, err := k8sClient.ListOpenStackVersions(ctx, namespace)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions in namespace '%s': %v", namespace, err)), nil
 		}
 
 		if len(versions) == 0 {
-			return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace %s", namespace)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace '%s'", namespace)), nil
 		}
 
 		name := versions[0].Name
@@ -144,7 +158,7 @@ func UpdateOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context
 		// Patch the OpenStackVersion CR
 		osVersion, err := k8sClient.PatchOpenStackVersion(ctx, namespace, name, targetVersion, customContainerImages)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to patch OpenStackVersion: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to patch OpenStackVersion '%s' in namespace '%s': %v", name, namespace, err)), nil
 		}
 
 		// Build response with relevant fields
@@ -180,8 +194,19 @@ func WaitOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.C
 		}
 
 		name, ok := request.Params.Arguments["name"].(string)
+
+		// If name is not provided, auto-discover the first OpenStackVersion in the namespace
 		if !ok || name == "" {
-			return mcp.NewToolResultError("name parameter is required"), nil
+			versions, err := k8sClient.ListOpenStackVersions(ctx, namespace)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions in namespace '%s': %v", namespace, err)), nil
+			}
+
+			if len(versions) == 0 {
+				return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace '%s'", namespace)), nil
+			}
+
+			name = versions[0].Name
 		}
 
 		conditionType, ok := request.Params.Arguments["condition"].(string)
@@ -189,8 +214,8 @@ func WaitOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.C
 			return mcp.NewToolResultError("condition parameter is required"), nil
 		}
 
-		// Optional timeout parameter (default 300 seconds)
-		timeout := 300
+		// Optional timeout parameter (default 600 seconds)
+		timeout := 600
 		if timeoutVal, ok := request.Params.Arguments["timeout"].(float64); ok {
 			timeout = int(timeoutVal)
 		}
@@ -218,7 +243,7 @@ func WaitOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.C
 		// Wait for the condition
 		status, err := k8sClient.WaitForCondition(ctx, namespace, name, conditionType, timeout, pollInterval, logFunc)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to wait for condition: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to wait for condition '%s' on '%s' in namespace '%s': %v", conditionType, name, namespace, err)), nil
 		}
 
 		// Build response
@@ -239,4 +264,136 @@ func WaitOpenStackVersionHandler(k8sClient *client.K8sClient) func(ctx context.C
 
 		return mcp.NewToolResultText(string(jsonData)), nil
 	}
+}
+
+// GetResumeStepHandler determines which upgrade step to resume from
+func GetResumeStepHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Extract parameters
+		namespace, ok := request.Params.Arguments["namespace"].(string)
+		if !ok || namespace == "" {
+			namespace = DefaultNamespace
+		}
+
+		name, ok := request.Params.Arguments["name"].(string)
+
+		var osVersion *openstackv1beta1.OpenStackVersion
+		var err error
+
+		if ok && name != "" {
+			// Query the specific OpenStackVersion CR by name
+			osVersion, err = k8sClient.GetOpenStackVersion(ctx, namespace, name)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to get OpenStackVersion '%s' in namespace '%s': %v", name, namespace, err)), nil
+			}
+		} else {
+			// Auto-discover: List all OpenStackVersion CRs and return the first one
+			versions, err := k8sClient.ListOpenStackVersions(ctx, namespace)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackVersions in namespace '%s': %v", namespace, err)), nil
+			}
+
+			if len(versions) == 0 {
+				return mcp.NewToolResultError(fmt.Sprintf("No OpenStackVersion CR found in namespace '%s'", namespace)), nil
+			}
+
+			osVersion = &versions[0]
+		}
+
+		// Extract version information
+		targetVersion := osVersion.Spec.TargetVersion
+		availableVersion := osVersion.Status.AvailableVersion
+		deployedVersion := osVersion.Status.DeployedVersion
+
+		// Build notReadyConditions array
+		notReadyConditions := []string{}
+		for _, cond := range osVersion.Status.Conditions {
+			if cond.Status != "True" {
+				notReadyConditions = append(notReadyConditions, string(cond.Type))
+			}
+		}
+
+		// Determine the resume step based on the decision logic
+		var resumeStep int
+		var explanation string
+
+		// Check if upgrade is in progress
+		if availableVersion == nil || targetVersion != *availableVersion {
+			// Not in progress - should start from pre-upgrade validation
+			resumeStep = 2
+			availableVersionStr := "nil"
+			if availableVersion != nil {
+				availableVersionStr = *availableVersion
+			}
+			explanation = fmt.Sprintf("Upgrade not in progress (targetVersion='%s' != availableVersion='%s'). Start from Step 2: Pre-Upgrade Validation.", targetVersion, availableVersionStr)
+		} else if deployedVersion != nil && targetVersion == *deployedVersion && len(notReadyConditions) == 0 {
+			// All conditions ready and target equals deployed - upgrade is complete
+			resumeStep = 10
+			explanation = fmt.Sprintf("Upgrade complete (targetVersion='%s' == deployedVersion='%s' and all conditions ready). Jump to Step 10: Update Complete.", targetVersion, *deployedVersion)
+		} else {
+			// Upgrade is in progress - check notReadyConditions
+			upgradeInProgress := true
+
+			// Map conditions to steps based on the resume decision table
+			if contains(notReadyConditions, "MinorUpdateOVNControlplane") {
+				resumeStep = 4
+				explanation = "notReadyConditions contains 'MinorUpdateOVNControlplane'. Resume at Step 4: Monitor OVN Controlplane Deployment."
+			} else if contains(notReadyConditions, "MinorUpdateOVNDataplane") {
+				resumeStep = 5
+				explanation = "notReadyConditions contains 'MinorUpdateOVNDataplane'. Resume at Step 5: Deploy OVN on Dataplane."
+			} else if contains(notReadyConditions, "MinorUpdateControlplane") {
+				resumeStep = 7
+				explanation = "notReadyConditions contains 'MinorUpdateControlplane'. Resume at Step 7: Monitor Controlplane Update Completion."
+			} else if contains(notReadyConditions, "MinorUpdateDataplane") {
+				resumeStep = 8
+				explanation = "notReadyConditions contains 'MinorUpdateDataplane'. Resume at Step 8: Deploy Update on Dataplane."
+			} else if len(notReadyConditions) == 0 && deployedVersion != nil && targetVersion == *deployedVersion {
+				resumeStep = 10
+				explanation = "All conditions ready and targetVersion equals deployedVersion. Resume at Step 10: Update Complete."
+			} else {
+				// Fallback - continue with pre-upgrade validation
+				resumeStep = 2
+				explanation = fmt.Sprintf("Could not determine specific resume point from notReadyConditions=%v. Starting from Step 2: Pre-Upgrade Validation.", notReadyConditions)
+				upgradeInProgress = false
+			}
+
+			if upgradeInProgress {
+				availableVersionStr := "nil"
+				if availableVersion != nil {
+					availableVersionStr = *availableVersion
+				}
+				explanation = fmt.Sprintf("Upgrade in progress (targetVersion='%s' == availableVersion='%s'). %s", targetVersion, availableVersionStr, explanation)
+			}
+		}
+
+		// Build response
+		response := map[string]interface{}{
+			"name":               osVersion.Name,
+			"namespace":          osVersion.Namespace,
+			"targetVersion":      targetVersion,
+			"availableVersion":   availableVersion,
+			"deployedVersion":    deployedVersion,
+			"notReadyConditions": notReadyConditions,
+			"resumeStep":         resumeStep,
+			"explanation":        explanation,
+		}
+
+		// Convert response to JSON
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal response: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonData)), nil
+	}
+}
+
+// contains checks if a string slice contains a specific string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

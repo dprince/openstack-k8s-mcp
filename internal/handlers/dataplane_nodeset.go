@@ -21,7 +21,11 @@ func ListDataplaneNodeSetsHandler(k8sClient *client.K8sClient) func(ctx context.
 		// List all OpenStackDataplaneNodeSet CRs
 		nodeSets, err := k8sClient.ListDataplaneNodeSets(ctx, namespace)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackDataplaneNodeSets: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to list OpenStackDataplaneNodeSets in namespace '%s': %v", namespace, err),
+				"KubernetesAPIError",
+			), nil
 		}
 
 		if len(nodeSets) == 0 {
@@ -53,7 +57,53 @@ func ListDataplaneNodeSetsHandler(k8sClient *client.K8sClient) func(ctx context.
 		// Convert response to JSON
 		jsonData, err := json.MarshalIndent(response, "", "  ")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal response: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeMarshalError,
+				fmt.Sprintf("Failed to marshal response: %v", err),
+				"MarshalError",
+			), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonData)), nil
+	}
+}
+
+// VerifyDataplaneNodeSetsHandler handles the verify_openstack_dataplanenodesets tool call
+func VerifyDataplaneNodeSetsHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Extract parameters
+		namespace, ok := request.Params.Arguments["namespace"].(string)
+		if !ok || namespace == "" {
+			namespace = DefaultNamespace
+		}
+
+		// Verify all NodeSets in the namespace
+		result, err := k8sClient.VerifyDataplaneNodeSetsConditions(ctx, namespace)
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to verify OpenStackDataplaneNodeSets in namespace '%s': %v", namespace, err),
+				"KubernetesAPIError",
+			), nil
+		}
+
+		// Build response
+		response := map[string]interface{}{
+			"namespace":        namespace,
+			"allReady":         result.AllReady,
+			"totalNodeSets":    result.TotalNodeSets,
+			"readyNodeSets":    result.ReadyNodeSets,
+			"notReadyNodeSets": result.NotReadyNodeSets,
+		}
+
+		// Convert response to JSON
+		jsonData, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeMarshalError,
+				fmt.Sprintf("Failed to marshal response: %v", err),
+				"MarshalError",
+			), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonData)), nil

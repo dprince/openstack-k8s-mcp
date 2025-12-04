@@ -16,6 +16,8 @@ A Model Context Protocol (MCP) server for querying OpenStack Kubernetes operator
 
 - **get_openstack_controlplane**: Query OpenStackControlPlane CRD to retrieve spec and status information
 
+- **verify_openstack_controlplane**: Verify that all conditions on an OpenStackControlPlane CRD are in a ready state
+
 - **create_dataplane_deployment**: Create an OpenStackDataplaneDeployment CR to deploy services on dataplane nodes
 
 - **get_dataplane_deployment**: Query OpenStackDataplaneDeployment CRD to retrieve spec and status information
@@ -23,6 +25,8 @@ A Model Context Protocol (MCP) server for querying OpenStack Kubernetes operator
 - **list_dataplane_deployments**: List all OpenStackDataplaneDeployment CRs in a namespace
 
 - **list_dataplane_nodesets**: List all OpenStackDataplaneNodeSet CRs in a namespace
+
+- **verify_openstack_dataplanenodesets**: Verify that all conditions on all OpenStackDataplaneNodeSet CRs in a namespace are in a ready state
 
 ## Prerequisites
 
@@ -56,17 +60,19 @@ The server communicates over stdio following the MCP protocol:
 Query an OpenStackVersion custom resource:
 
 **Parameters:**
-- `namespace` (required): Kubernetes namespace where the OpenStackVersion CR is located
-- `name` (required): Name of the OpenStackVersion CR to query
+- `namespace` (optional): Kubernetes namespace where the OpenStackVersion CR is located. Defaults to `openstack` if not provided.
+- `name` (optional): Name of the OpenStackVersion CR to query. If not provided, auto-discovers the first CR in the namespace.
 
 **Returns:**
 JSON object containing:
 - `name`: CR name
 - `namespace`: CR namespace
-- `spec.targetVersion`: Desired OpenStack version
-- `status.availableVersion`: Available version
-- `status.deployedVersion`: Currently deployed version
-- `status.conditions`: Array of condition objects with type, status, reason, message, and lastTransitionTime
+- `targetVersion`: Desired OpenStack version
+- `availableVersion`: Available version
+- `deployedVersion`: Currently deployed version
+- `readyConditions`: Array of condition types that are ready (status: True)
+- `notReadyConditions`: Array of condition types that are not ready
+- `customContainerImages`: Custom container images (if present)
 
 ### Example Response
 
@@ -74,32 +80,20 @@ JSON object containing:
 {
   "name": "openstack",
   "namespace": "openstack",
-  "spec": {
-    "targetVersion": "0.3.0"
-  },
-  "status": {
-    "availableVersion": "0.3.0",
-    "deployedVersion": "0.3.0",
-    "conditions": [
-      {
-        "type": "Ready",
-        "status": "True",
-        "lastTransitionTime": "2025-01-15T10:30:00Z",
-        "reason": "AllComponentsReady",
-        "message": "All OpenStack components are ready"
-      }
-    ]
-  }
+  "targetVersion": "0.3.0",
+  "availableVersion": "0.3.0",
+  "deployedVersion": "0.3.0",
+  "readyConditions": ["Ready", "Available"],
+  "notReadyConditions": []
 }
 ```
 
 ### MCP Tool: update\_openstack\_version
 
-Patch the targetVersion and optionally customContainerImages fields of an OpenStackVersion custom resource:
+Patch the targetVersion and optionally customContainerImages fields of the first OpenStackVersion custom resource in the namespace:
 
 **Parameters:**
 - `namespace` (optional): Kubernetes namespace where the OpenStackVersion CR is located. Defaults to `openstack` if not provided.
-- `name` (required): Name of the OpenStackVersion CR to patch
 - `targetVersion` (required): The target version to set for the OpenStackVersion CR
 - `customContainerImages` (optional): Map of service names to custom container image URLs. If not provided, customContainerImages will not be modified.
 
@@ -131,7 +125,6 @@ JSON object containing:
 
 ```json
 {
-  "name": "openstack",
   "namespace": "openstack",
   "targetVersion": "0.4.0",
   "customContainerImages": {
@@ -147,9 +140,9 @@ Wait for a specific condition to be met on an OpenStackVersion custom resource:
 
 **Parameters:**
 - `namespace` (optional): Kubernetes namespace where the OpenStackVersion CR is located. Defaults to `openstack` if not provided.
-- `name` (required): Name of the OpenStackVersion CR to wait on
+- `name` (optional): Name of the OpenStackVersion CR to wait on. If not provided, auto-discovers the first CR in the namespace.
 - `condition` (required): The condition type to wait for (e.g., "Ready", "Available")
-- `timeout` (optional): Maximum time to wait in seconds. Defaults to 300 seconds if not provided.
+- `timeout` (optional): Maximum time to wait in seconds. Defaults to 600 seconds if not provided.
 - `pollInterval` (optional): Interval in seconds between polling attempts. Defaults to 5 seconds if not provided.
 
 **Returns:**
@@ -242,14 +235,71 @@ JSON object containing:
 }
 ```
 
+### MCP Tool: verify\_openstack\_controlplane
+
+Verify that all conditions on an OpenStackControlPlane custom resource are in a ready state:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackControlPlane CR is located. Defaults to `openstack` if not provided.
+- `name` (optional): Name of the OpenStackControlPlane CR to verify. If not provided, verifies the first CR found in the namespace.
+
+**Returns:**
+JSON object containing:
+- `name`: CR name
+- `namespace`: CR namespace
+- `allReady`: Boolean indicating whether all conditions are ready
+- `totalConditions`: Total number of conditions
+- `readyConditions`: Array of condition type strings that are ready
+- `notReadyConditions`: Array of condition objects that are not ready, each containing type, status, reason, and message
+
+### Example Response (All Ready)
+
+```json
+{
+  "name": "openstack",
+  "namespace": "openstack",
+  "allReady": true,
+  "totalConditions": 5,
+  "readyConditions": ["Ready", "Available", "Configured", "Deployed", "ServiceReady"],
+  "notReadyConditions": []
+}
+```
+
+### Example Response (Not Ready)
+
+```json
+{
+  "name": "openstack",
+  "namespace": "openstack",
+  "allReady": false,
+  "totalConditions": 5,
+  "readyConditions": ["Configured", "Deployed"],
+  "notReadyConditions": [
+    {
+      "type": "Ready",
+      "status": "False",
+      "reason": "Deploying",
+      "message": "OpenStack services are being deployed"
+    },
+    {
+      "type": "Available",
+      "status": "False",
+      "reason": "Deploying",
+      "message": "Some services are not yet available"
+    }
+  ]
+}
+```
+
 ### MCP Tool: create\_dataplane\_deployment
 
 Create an OpenStackDataplaneDeployment custom resource to deploy services on dataplane nodes:
 
 **Parameters:**
 - `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneDeployment CR will be created. Defaults to `openstack` if not provided.
-- `name` (required): Name of the OpenStackDataplaneDeployment CR to create
-- `nodeSets` (required): Array of nodeSet names to deploy to. Must contain at least one nodeSet.
+- `name` (required): Name of the OpenStackDataplaneDeployment CR to create (use dashes/underscores, not dots)
+- `spec` (optional): Complete deployment spec as JSON object. Can include nodeSets, servicesOverride, ansibleTags, ansibleLimit, etc.
+- `nodeSets` (optional): Array of nodeSet names to deploy to. If not provided and no spec given, auto-discovers all nodeSets in namespace.
 - `servicesOverride` (optional): Array of service names to override the default services for the deployment
 
 **Returns:**
@@ -491,6 +541,73 @@ JSON array containing objects with:
     }
   }
 ]
+```
+
+### MCP Tool: verify\_openstack\_dataplanenodesets
+
+Verify that all conditions on all OpenStackDataplaneNodeSet custom resources in a namespace are in a ready state:
+
+**Parameters:**
+- `namespace` (optional): Kubernetes namespace where the OpenStackDataplaneNodeSet CRs are located. Defaults to `openstack` if not provided.
+
+**Returns:**
+JSON object containing:
+- `namespace`: Namespace that was checked
+- `allReady`: Boolean indicating whether all NodeSets are ready
+- `totalNodeSets`: Total number of NodeSets in the namespace
+- `readyNodeSets`: Array of NodeSet names that are ready
+- `notReadyNodeSets`: Array of NodeSet verification results for NodeSets that are not ready
+
+Each `notReadyNodeSets` entry contains:
+- `name`: NodeSet name
+- `allReady`: Boolean indicating whether all conditions are ready
+- `totalConditions`: Total number of conditions
+- `readyConditions`: Array of condition type strings that are ready
+- `notReadyConditions`: Array of condition objects with type, status, reason, and message
+
+### Example Response (All Ready)
+
+```json
+{
+  "namespace": "openstack",
+  "allReady": true,
+  "totalNodeSets": 2,
+  "readyNodeSets": ["compute-nodes", "controller-nodes"],
+  "notReadyNodeSets": []
+}
+```
+
+### Example Response (Not All Ready)
+
+```json
+{
+  "namespace": "openstack",
+  "allReady": false,
+  "totalNodeSets": 2,
+  "readyNodeSets": ["controller-nodes"],
+  "notReadyNodeSets": [
+    {
+      "name": "compute-nodes",
+      "allReady": false,
+      "totalConditions": 3,
+      "readyConditions": ["SetupReady"],
+      "notReadyConditions": [
+        {
+          "type": "DeploymentReady",
+          "status": "False",
+          "reason": "Deploying",
+          "message": "Deployment in progress"
+        },
+        {
+          "type": "Ready",
+          "status": "False",
+          "reason": "NotReady",
+          "message": "NodeSet is not ready"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Configuration with Claude Desktop

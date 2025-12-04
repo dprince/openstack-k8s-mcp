@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/dprince/openstack-k8s-mcp/internal/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -20,8 +21,15 @@ func CreateDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx cont
 
 		name, ok := request.Params.Arguments["name"].(string)
 		if !ok || name == "" {
-			return mcp.NewToolResultError("name parameter is required"), nil
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				"name parameter is required and must be a non-empty string",
+				"ParameterValidationError",
+			), nil
 		}
+
+		// Replace dots with dashes in the name
+		name = strings.ReplaceAll(name, ".", "-")
 
 		// Build the spec map - start with an empty map
 		spec := make(map[string]interface{})
@@ -32,29 +40,66 @@ func CreateDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx cont
 			spec = specParam
 		} else {
 			// Legacy approach: extract nodeSets and servicesOverride individually
-			// Extract nodeSets parameter (required when not using spec, must be array)
+			// Extract nodeSets parameter (optional - if not provided, auto-discover all nodeSets)
 			nodeSetsRaw, ok := request.Params.Arguments["nodeSets"]
+
+			var nodeSets []string
 			if !ok {
-				return mcp.NewToolResultError("either 'spec' parameter or 'nodeSets' parameter is required"), nil
-			}
-
-			// Convert nodeSets to []string
-			nodeSetsArray, ok := nodeSetsRaw.([]interface{})
-			if !ok {
-				return mcp.NewToolResultError("nodeSets must be an array"), nil
-			}
-
-			if len(nodeSetsArray) == 0 {
-				return mcp.NewToolResultError("nodeSets must contain at least one nodeSet"), nil
-			}
-
-			nodeSets := make([]string, len(nodeSetsArray))
-			for i, ns := range nodeSetsArray {
-				nodeSetStr, ok := ns.(string)
-				if !ok {
-					return mcp.NewToolResultError(fmt.Sprintf("nodeSets element at index %d must be a string", i)), nil
+				// No nodeSets provided - auto-discover all nodeSets in the namespace
+				allNodeSets, err := k8sClient.ListDataplaneNodeSets(ctx, namespace)
+				if err != nil {
+					return newStructuredError(
+						ErrorCodeK8sAPIError,
+						fmt.Sprintf("Failed to list OpenStackDataplaneNodeSets in namespace '%s': %v", namespace, err),
+						"KubernetesAPIError",
+					), nil
 				}
-				nodeSets[i] = nodeSetStr
+
+				if len(allNodeSets) == 0 {
+					return newStructuredError(
+						ErrorCodeInvalidParameter,
+						fmt.Sprintf("No OpenStackDataplaneNodeSets found in namespace '%s'. Please create nodesets first or provide explicit nodeSets parameter.", namespace),
+						"ParameterValidationError",
+					), nil
+				}
+
+				// Extract names from all nodeSets
+				nodeSets = make([]string, len(allNodeSets))
+				for i, ns := range allNodeSets {
+					metadata := ns["metadata"].(map[string]interface{})
+					nodeSets[i] = metadata["name"].(string)
+				}
+			} else {
+				// Convert provided nodeSets to []string
+				nodeSetsArray, ok := nodeSetsRaw.([]interface{})
+				if !ok {
+					return newStructuredError(
+						ErrorCodeInvalidParameter,
+						"nodeSets must be an array",
+						"ParameterValidationError",
+					), nil
+				}
+
+				if len(nodeSetsArray) == 0 {
+					return newStructuredError(
+						ErrorCodeInvalidParameter,
+						"nodeSets must contain at least one nodeSet",
+						"ParameterValidationError",
+					), nil
+				}
+
+				nodeSets = make([]string, len(nodeSetsArray))
+				for i, ns := range nodeSetsArray {
+					nodeSetStr, ok := ns.(string)
+					if !ok {
+						return newStructuredError(
+							ErrorCodeInvalidParameter,
+							fmt.Sprintf("nodeSets element at index %d must be a string", i),
+							"ParameterValidationError",
+						), nil
+					}
+					nodeSets[i] = nodeSetStr
+				}
 			}
 			spec["nodeSets"] = nodeSets
 
@@ -62,14 +107,22 @@ func CreateDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx cont
 			if servicesOverrideRaw, ok := request.Params.Arguments["servicesOverride"]; ok {
 				servicesOverrideArray, ok := servicesOverrideRaw.([]interface{})
 				if !ok {
-					return mcp.NewToolResultError("servicesOverride must be an array of strings"), nil
+					return newStructuredError(
+						ErrorCodeInvalidParameter,
+						"servicesOverride must be an array of strings",
+						"ParameterValidationError",
+					), nil
 				}
 
 				servicesOverride := make([]string, len(servicesOverrideArray))
 				for i, svc := range servicesOverrideArray {
 					svcStr, ok := svc.(string)
 					if !ok {
-						return mcp.NewToolResultError(fmt.Sprintf("servicesOverride element at index %d must be a string", i)), nil
+						return newStructuredError(
+							ErrorCodeInvalidParameter,
+							fmt.Sprintf("servicesOverride element at index %d must be a string", i),
+							"ParameterValidationError",
+						), nil
 					}
 					servicesOverride[i] = svcStr
 				}
@@ -79,13 +132,26 @@ func CreateDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx cont
 
 		// Validate that nodeSets is present in the spec
 		if _, ok := spec["nodeSets"]; !ok {
-			return mcp.NewToolResultError("spec must contain 'nodeSets' field"), nil
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				"spec must contain 'nodeSets' field",
+				"ParameterValidationError",
+			), nil
+		}
+
+		// Set default deploymentRequeueTime to 1 if not provided
+		if _, ok := spec["deploymentRequeueTime"]; !ok {
+			spec["deploymentRequeueTime"] = 1
 		}
 
 		// Create the OpenStackDataplaneDeployment CR
 		err := k8sClient.CreateDataplaneDeployment(ctx, namespace, name, spec)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to create OpenStackDataplaneDeployment: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to create OpenStackDataplaneDeployment '%s' in namespace '%s': %v", name, namespace, err),
+				"KubernetesAPIError",
+			), nil
 		}
 
 		// Build success response
@@ -107,13 +173,24 @@ func GetDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx context
 
 		name, ok := request.Params.Arguments["name"].(string)
 		if !ok || name == "" {
-			return mcp.NewToolResultError("name parameter is required"), nil
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				"name parameter is required and must be a non-empty string",
+				"ParameterValidationError",
+			), nil
 		}
+
+		// Replace dots with dashes in the name
+		name = strings.ReplaceAll(name, ".", "-")
 
 		// Get the OpenStackDataplaneDeployment CR
 		deployment, err := k8sClient.GetDataplaneDeployment(ctx, namespace, name)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to get OpenStackDataplaneDeployment: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to get OpenStackDataplaneDeployment '%s' in namespace '%s': %v", name, namespace, err),
+				"KubernetesAPIError",
+			), nil
 		}
 
 		// Extract relevant fields
@@ -135,10 +212,162 @@ func GetDataplaneDeploymentHandler(k8sClient *client.K8sClient) func(ctx context
 		// Convert response to JSON
 		jsonData, err := json.MarshalIndent(response, "", "  ")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal response: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeMarshalError,
+				fmt.Sprintf("Failed to marshal response: %v", err),
+				"MarshalError",
+			), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonData)), nil
+	}
+}
+
+// CreateDataplaneDeploymentOVNHandler handles the create_dataplane_deployment_ovn tool call
+func CreateDataplaneDeploymentOVNHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Extract parameters
+		namespace, ok := request.Params.Arguments["namespace"].(string)
+		if !ok || namespace == "" {
+			namespace = DefaultNamespace
+		}
+
+		name, ok := request.Params.Arguments["name"].(string)
+		if !ok || name == "" {
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				"name parameter is required and must be a non-empty string",
+				"ParameterValidationError",
+			), nil
+		}
+
+		// Replace dots with dashes in the name
+		name = strings.ReplaceAll(name, ".", "-")
+
+		// Build the spec map
+		spec := make(map[string]interface{})
+
+		// Auto-discover all nodeSets in the namespace
+		allNodeSets, err := k8sClient.ListDataplaneNodeSets(ctx, namespace)
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to list OpenStackDataplaneNodeSets in namespace '%s': %v", namespace, err),
+				"KubernetesAPIError",
+			), nil
+		}
+
+		if len(allNodeSets) == 0 {
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				fmt.Sprintf("No OpenStackDataplaneNodeSets found in namespace '%s'. Please create nodesets first.", namespace),
+				"ParameterValidationError",
+			), nil
+		}
+
+		// Extract names from all nodeSets
+		nodeSets := make([]string, len(allNodeSets))
+		for i, ns := range allNodeSets {
+			metadata := ns["metadata"].(map[string]interface{})
+			nodeSets[i] = metadata["name"].(string)
+		}
+		spec["nodeSets"] = nodeSets
+
+		// Set servicesOverride to ["ovn"]
+		spec["servicesOverride"] = []string{"ovn"}
+
+		// Set default deploymentRequeueTime to 1
+		spec["deploymentRequeueTime"] = 1
+
+		// Create the OpenStackDataplaneDeployment CR
+		err = k8sClient.CreateDataplaneDeployment(ctx, namespace, name, spec)
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to create OpenStackDataplaneDeployment '%s' in namespace '%s': %v", name, namespace, err),
+				"KubernetesAPIError",
+			), nil
+		}
+
+		// Build success response
+		specJSON, _ := json.MarshalIndent(spec, "", "  ")
+		successMessage := fmt.Sprintf("Successfully created OpenStackDataplaneDeployment '%s' in namespace '%s' with servicesOverride=[ovn] and spec:\n%s", name, namespace, string(specJSON))
+
+		return mcp.NewToolResultText(successMessage), nil
+	}
+}
+
+// CreateDataplaneDeploymentUpdateHandler handles the create_dataplane_deployment_update tool call
+func CreateDataplaneDeploymentUpdateHandler(k8sClient *client.K8sClient) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Extract parameters
+		namespace, ok := request.Params.Arguments["namespace"].(string)
+		if !ok || namespace == "" {
+			namespace = DefaultNamespace
+		}
+
+		name, ok := request.Params.Arguments["name"].(string)
+		if !ok || name == "" {
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				"name parameter is required and must be a non-empty string",
+				"ParameterValidationError",
+			), nil
+		}
+
+		// Replace dots with dashes in the name
+		name = strings.ReplaceAll(name, ".", "-")
+
+		// Build the spec map
+		spec := make(map[string]interface{})
+
+		// Auto-discover all nodeSets in the namespace
+		allNodeSets, err := k8sClient.ListDataplaneNodeSets(ctx, namespace)
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to list OpenStackDataplaneNodeSets in namespace '%s': %v", namespace, err),
+				"KubernetesAPIError",
+			), nil
+		}
+
+		if len(allNodeSets) == 0 {
+			return newStructuredError(
+				ErrorCodeInvalidParameter,
+				fmt.Sprintf("No OpenStackDataplaneNodeSets found in namespace '%s'. Please create nodesets first.", namespace),
+				"ParameterValidationError",
+			), nil
+		}
+
+		// Extract names from all nodeSets
+		nodeSets := make([]string, len(allNodeSets))
+		for i, ns := range allNodeSets {
+			metadata := ns["metadata"].(map[string]interface{})
+			nodeSets[i] = metadata["name"].(string)
+		}
+		spec["nodeSets"] = nodeSets
+
+		// Set servicesOverride to ["update"]
+		spec["servicesOverride"] = []string{"update"}
+
+		// Set default deploymentRequeueTime to 1
+		spec["deploymentRequeueTime"] = 1
+
+		// Create the OpenStackDataplaneDeployment CR
+		err = k8sClient.CreateDataplaneDeployment(ctx, namespace, name, spec)
+		if err != nil {
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to create OpenStackDataplaneDeployment '%s' in namespace '%s': %v", name, namespace, err),
+				"KubernetesAPIError",
+			), nil
+		}
+
+		// Build success response
+		specJSON, _ := json.MarshalIndent(spec, "", "  ")
+		successMessage := fmt.Sprintf("Successfully created OpenStackDataplaneDeployment '%s' in namespace '%s' with servicesOverride=[update] and spec:\n%s", name, namespace, string(specJSON))
+
+		return mcp.NewToolResultText(successMessage), nil
 	}
 }
 
@@ -154,7 +383,11 @@ func ListDataplaneDeploymentsHandler(k8sClient *client.K8sClient) func(ctx conte
 		// List all OpenStackDataplaneDeployment CRs
 		deployments, err := k8sClient.ListDataplaneDeployments(ctx, namespace)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to list OpenStackDataplaneDeployments: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeK8sAPIError,
+				fmt.Sprintf("Failed to list OpenStackDataplaneDeployments in namespace '%s': %v", namespace, err),
+				"KubernetesAPIError",
+			), nil
 		}
 
 		if len(deployments) == 0 {
@@ -186,7 +419,11 @@ func ListDataplaneDeploymentsHandler(k8sClient *client.K8sClient) func(ctx conte
 		// Convert response to JSON
 		jsonData, err := json.MarshalIndent(response, "", "  ")
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal response: %v", err)), nil
+			return newStructuredError(
+				ErrorCodeMarshalError,
+				fmt.Sprintf("Failed to marshal response: %v", err),
+				"MarshalError",
+			), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonData)), nil
